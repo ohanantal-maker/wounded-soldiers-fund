@@ -1,0 +1,70 @@
+name: SEO audit (Claude SEO)
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: "Sites to check (space separated)"
+        default: "https://happytue.com https://www.happytue.com https://hanantal.com"
+  push:
+    paths: [".github/workflows/seo-audit.yml"]
+
+permissions:
+  contents: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      URLS: ${{ github.event.inputs.urls || 'https://happytue.com https://www.happytue.com https://hanantal.com' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Claude SEO scripts (pinned v2.4.2)
+        run: |
+          git clone --depth 1 --branch v2.4.2 https://github.com/AgriciDaniel/claude-seo.git /tmp/claude-seo
+          pip install "beautifulsoup4>=4.15,<5" "lxml>=6.1.1,<7" "lxml_html_clean>=0.4.5,<1" "requests>=2.34.2,<3" "urllib3>=2.7,<3"
+
+      - name: Check availability and run audit
+        run: |
+          mkdir -p reports
+          R="reports/seo-$(date -u +%Y-%m-%d_%H%M).md"
+          S=/tmp/claude-seo/scripts
+          echo "# SEO check — $(date -u '+%Y-%m-%d %H:%M UTC')" > "$R"
+          echo "Run from GitHub Actions (neutral network). Tool: Claude SEO v2.4.2" >> "$R"
+          for u in $URLS; do
+            host=$(echo "$u" | sed -E 's#https?://([^/]+).*#\1#')
+            echo -e "\n## $u\n" >> "$R"
+            echo '### DNS' >> "$R"; echo '```' >> "$R"
+            getent hosts "$host" >> "$R" 2>&1 || echo "DNS: no record" >> "$R"
+            echo '```' >> "$R"
+            echo '### HTTP (redirect chain)' >> "$R"; echo '```' >> "$R"
+            curl -sIL -m 20 -A "Mozilla/5.0" "$u" 2>&1 | grep -iE "^HTTP/|^location:|^x-robots|^server:" >> "$R" || echo "no response" >> "$R"
+            echo '```' >> "$R"
+            echo '### robots.txt' >> "$R"; echo '```' >> "$R"
+            curl -sL -m 20 -A "Mozilla/5.0" "${u%/}/robots.txt" | head -40 >> "$R" || true
+            echo '```' >> "$R"
+            echo '### Page SEO elements (Claude SEO parse_html)' >> "$R"; echo '```json' >> "$R"
+            rm -f /tmp/page.html
+            python "$S/fetch_page.py" "$u" --output /tmp/page.html >/dev/null 2>&1 || curl -sL -m 20 -A "Mozilla/5.0" "$u" -o /tmp/page.html || true
+            if [ -s /tmp/page.html ]; then
+              python "$S/parse_html.py" /tmp/page.html --url "$u" --json 2>&1 | head -c 12000 >> "$R"
+            else
+              echo "page could not be fetched" >> "$R"
+            fi
+            echo -e '\n```' >> "$R"
+          done
+          cat "$R"
+
+      - name: Save report to repo
+        run: |
+          git config user.name "seo-bot"
+          git config user.email "seo-bot@users.noreply.github.com"
+          git add reports
+          git commit -m "SEO report $(date -u +%F)" || echo "nothing to commit"
+          git push
